@@ -37,8 +37,8 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'profiles',
     'shops',
+    'products',
     'rest_framework',
     'rest_framework.authtoken',
 
@@ -124,7 +124,7 @@ STATIC_URL = 'static/'
 
 # config/settings.py
 
-AUTH_USER_MODEL = 'profiles.Profile'
+# AUTH_USER_MODEL = 'profiles.Profile'
 
 import os
 from pathlib import Path
@@ -136,3 +136,13 @@ MEDIA_URL = '/media/'
 
 # The actual folder on your computer where files are stored
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+# Install django-redis: pip install django-redis
+# CACHES = {
+#     "default": {
+#         "BACKEND": "django_redis.cache.RedisCache",
+#         "LOCATION": "redis://127.0.0.1:6379/1",
+#         "OPTIONS": {
+#             "CLIENT_CLASS": "django_redis.client.DefaultClient",
+#         }
+#     }
+# }

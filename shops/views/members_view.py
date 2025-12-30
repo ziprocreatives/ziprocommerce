@@ -29,11 +29,9 @@ class StartPreRegistrationAPI(APIView):
     """
 
     def post(self, request):
-        email = request.data.get('email')
-        # This raw_data should include: shop_name, shop_url, nickname, password
-        raw_data = request.data
-
-        otp, msg = ShopMember.objects.start_pre_registration(email, raw_data)
+        identifier = request.data.get('identifier')
+        data = request.data
+        otp, msg = ShopMember.objects.start_pre_registration(data)
         if not otp:
             return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
 

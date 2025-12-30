@@ -3,120 +3,94 @@ from django.db import models, transaction
 from django.utils import timezone
 from datetime import timedelta
 
-
 class ShopMemberManager(models.Manager):
 
     # ==========================================
-    # 1. PRE-REGISTRATION (STAGING) LOGIC
+    # 1. PRE-REGISTRATION WORKFLOW (OTP APP)
     # ==========================================
 
-    def start_pre_registration(self, email, raw_data):
-        """
-        Step 1: Collect email and data, store in 'PreeRegistration' staging table.
-        Uses update_or_create so a user can request a new OTP if they didn't get the first one.
-        """
-        from shops.models import PreeRegistration
-
-        # 1. Check if email is already in the real ShopMember table
-        if self.filter(identifier=email).exists():
-            return None, "This email is already registered to a shop."
-
-        otp_code = str(random.randint(100000, 999999))
-
-        # 2. Store data in staging table
-        registration, created = PreeRegistration.objects.update_or_create(
-            identifier=email,
-            defaults={
-                'otp_code': otp_code,
-                'data': raw_data,  # Contains nickname, password, shop_name, etc.
-                'created_at': timezone.now()
-            }
-        )
-        return otp_code, "Verification code sent to email."
+    def start_pre_registration(self, identifier):
+        """Initializes OTP process via the central OTP app."""
+        from otp.models import PreeRegistration
+        
+        # Calling centralized logic from the OTP model instance
+        otp_service = PreeRegistration()
+        result, message = otp_service.generate_otp(identifier)
+        
+        if result:
+            return message, "Verification code sent to email."
+        return None, message
 
     @transaction.atomic
-    def finalize_registration(self, email, code):
+    def finalize_registration(self, data):
+        """Verifies OTP via central app and triggers Shop creation."""
+        from otp.models import PreeRegistration
+        
+        # 1. Verify using the centralized system
+        otp_service = PreeRegistration()
+        success, member_or_msg = otp_service.verify_otp(
+            data.get('identifier'), 
+            data.get('code')
+        )
+        
+        if not success:
+            return None, member_or_msg 
+
+        # 2. OTP is valid, proceed to creation logic
+        try:
+            # We use the separate creation function defined below
+            creator = self.create_shop_with_creator(data)
+            
+            # 3. Success cleanup: member_or_msg is the PreeRegistration instance
+            member_or_msg.delete() 
+            
+            return creator, "Shop and Account created successfully."
+        except Exception as e:
+            # transaction.atomic rolls back database changes if an error occurs
+            return None, f"Registration failed during creation: {str(e)}"
+
+    # ==========================================
+    # 2. CORE BUSINESS LOGIC (Independent)
+    # ==========================================
+
+    def create_shop_with_creator(self, data):
         """
-        Step 2: Verify OTP from staging table and move data to permanent tables.
-        This creates the Shop and the Creator simultaneously.
+        Independent creation logic. 
+        Creates: Shop -> ShopMember (Creator) -> ShopDetails.
         """
-        from shops.models import PreeRegistration, Shop
-
-        # 1. Find the staging record
-        pending = PreeRegistration.objects.filter(identifier=email).first()
-
-        if not pending:
-            return None, "No registration session found."
-
-        if pending.is_expired():
-            pending.delete()
-            return None, "OTP expired. Please start over."
-
-        if pending.otp_code != str(code):
-            return None, "Invalid OTP code."
-
-        # 2. Extract verified data
-        data = pending.data
-
-        # 3. Create the Shop (triggers Shop.save() to create sub-tables)
+        from shops.models import Shop
+        ShopName=data.get('shop_name')
+        identifier=data.get('identifier')
+        while True:
+            rand=random.randint(1000, 9999)
+            generated_url=f"{ShopName.lower().replace(' ', '-')}-{rand}"
+            if not Shop.objects.filter(url=generated_url).exists():
+                break
+        # A. Create the Shop
         shop = Shop.objects.create(
-            name=data.get('shop_name'),
-            url=data.get('shop_url')
+            name=ShopName,
+            url=generated_url
         )
 
-        # 4. Create the Creator (Admin)
+        # B. Create the Creator (Attached to the shop)
         creator = self.create(
             shop=shop,
             nickname=data.get('nickname'),
-            identifier=email,
+            identifier=data.get('identifier'),
             password=data.get('password'),
             role='creator',
             is_verified=True
         )
 
-        # 5. Optional: Map extra fields to ShopDetails
-        if 'description' in data:
-            shop.details.description = data.get('description')
-        if 'category' in data:
-            shop.details.category = data.get('category', 'General')
-        shop.details.save()
+        # C. Populate ShopDetails
+        if hasattr(shop, 'details'):
+            if 'description' in data:
+                shop.details.description = data.get('description')
+            if 'category' in data:
+                shop.details.category = data.get('category', 'General')
+            shop.details.save()
 
-        # 6. Cleanup the staging table
-        pending.delete()
-
-        return creator, "Shop and Account created successfully."
-
-    # ==========================================
-    # 2. AUTHENTICATION & SECURITY (OTP)
-    # ==========================================
-
-    def generate_otp(self, email):
-        """Generates a 6-digit code and sets expiry for 5 minutes."""
-        # Using 'identifier' to match your updated model
-        member = self.filter(identifier=email).first()
-        if not member:
-            return None, "Email not found."
-
-        otp_code = random.randint(100000, 999999)
-        member.otp = otp_code
-        member.otp_expire = timezone.now() + timedelta(minutes=5)
-        member.save()
-        return otp_code, "OTP generated successfully."
-
-    def verify_otp(self, email, code):
-        """Verifies code and clears it upon success to prevent reuse."""
-        member = self.filter(identifier=email).first()
-        if not member or member.otp == 0:
-            return False, "No active OTP request found."
-
-        if member.otp_expire < timezone.now():
-            return False, "OTP has expired."
-
-        if member.otp == int(code):
-            member.otp = 0  # Clear OTP after successful use
-            member.save()
-            return True, member
-        return False, "Invalid OTP code."
+        return creator
 
     # ==========================================
     # 3. STAFF MANAGEMENT (Add, Get, Delete)
@@ -125,7 +99,6 @@ class ShopMemberManager(models.Manager):
     def add_staff(self, shop_id, admin_id, nickname, email, password, role='handler'):
         """Only Creators can add new staff members."""
         from shops.models import Shop
-
         allowed, msg = Shop.objects._verify_access(shop_id, admin_id, required_role='creator')
         if not allowed: return None, msg
 
@@ -134,13 +107,13 @@ class ShopMemberManager(models.Manager):
             nickname=nickname,
             identifier=email,
             password=password,
-            role=role
+            role=role,
+            is_verified=True
         ), "Staff member added successfully."
 
     def get_staff_by_id(self, shop_id, requester_id, target_id):
         """Retrieves a single staff member within a specific shop context."""
         from shops.models import Shop
-
         allowed, msg = Shop.objects._verify_access(shop_id, requester_id)
         if not allowed: return None, msg
 
@@ -149,14 +122,13 @@ class ShopMemberManager(models.Manager):
         return member, "Success"
 
     def delete_staff(self, shop_id, admin_id, target_id):
-        """Permanently removes a staff member. Prevents creator self-deletion."""
+        """Removes a staff member. Prevents creator self-deletion."""
         from shops.models import Shop
-
         allowed, msg = Shop.objects._verify_access(shop_id, admin_id, required_role='creator')
         if not allowed: return False, msg
 
         if str(admin_id) == str(target_id):
-            return False, "Security Error: You cannot delete yourself. Handover ownership first."
+            return False, "Security Error: You cannot delete yourself."
 
         deleted_count, _ = self.filter(shop_id=shop_id, id=target_id).delete()
         if deleted_count > 0:
@@ -164,32 +136,42 @@ class ShopMemberManager(models.Manager):
         return False, "Member not found."
 
     # ==========================================
-    # 4. ACCESS HANDOVER (Transfer Ownership)
+    # 4. ACCESS & ROLE MANAGEMENT
     # ==========================================
 
     @transaction.atomic
     def handover_access(self, shop_id, current_creator_id, new_creator_id):
-        """Swaps roles: Promotes a Handler to Creator and demotes the old Creator."""
+        """Transfers Ownership: Promotes a Handler and demotes the old Creator."""
         from shops.models import Shop
-
         allowed, msg = Shop.objects._verify_access(shop_id, current_creator_id, required_role='creator')
         if not allowed: return False, msg
 
         old_owner = self.filter(id=current_creator_id, shop_id=shop_id).first()
         new_owner = self.filter(id=new_creator_id, shop_id=shop_id).first()
 
-        if not new_owner:
-            return False, "Target member for handover not found."
+        if not new_owner: return False, "Target member not found."
 
         new_owner.role = 'creator'
         old_owner.role = 'handler'
-
         new_owner.save()
         old_owner.save()
         return True, f"Ownership transferred to {new_owner.nickname}."
 
+    def update_role(self, shop_id, admin_id, target_id, new_role):
+        """Updates a staff member's role."""
+        from shops.models import Shop
+        allowed, msg = Shop.objects._verify_access(shop_id, admin_id, required_role='creator')
+        if not allowed: return msg
+
+        member = self.filter(id=target_id, shop_id=shop_id).first()
+        if member:
+            member.role = new_role
+            member.save()
+            return f"Role changed to {new_role}."
+        return "Member not found."
+
     # ==========================================
-    # 5. GRANULAR UPDATES
+    # 5. GRANULAR UPDATES & UTILITIES
     # ==========================================
 
     def update_nickname(self, member_id, new_nickname):
@@ -215,19 +197,8 @@ class ShopMemberManager(models.Manager):
         member.save()
         return "Password updated."
 
-    def update_role(self, shop_id, admin_id, target_id, new_role):
-        from shops.models import Shop
-        allowed, msg = Shop.objects._verify_access(shop_id, admin_id, required_role='creator')
-        if not allowed: return msg
-
-        member = self.filter(id=target_id, shop_id=shop_id).first()
-        if member:
-            member.role = new_role
-            member.save()
-            return f"Role changed to {new_role}."
-        return "Member not found."
-
     def delete_otp(self, member_id):
+        """Clears OTP fields for existing members."""
         member = self.filter(id=member_id).first()
         if member:
             member.otp = 0

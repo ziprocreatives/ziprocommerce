@@ -12,7 +12,7 @@ from customers.customer_manager import CustomerManager
 
 class Customer(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    shop = models.ForeignKey('shops.Shop', on_delete=models.CASCADE, related_name='customers')
+    shop = models.ForeignKey('shop.Shop', on_delete=models.CASCADE, related_name='customers')
     identifier = models.CharField(max_length=20, unique=True, editable=False)
 
     # Login Credentials

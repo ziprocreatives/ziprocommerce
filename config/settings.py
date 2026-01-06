@@ -37,11 +37,15 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'shops',
-    'products',
-    'otp',
-    'customers',
+    'shop',
+    'pre_registration',
     'rest_framework',
+    'admin',
+    'social',
+    'products',
+    'details',
+    'image',
+    'customers',
     'rest_framework.authtoken',
 
 
@@ -148,3 +152,8 @@ MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 #         }
 #     }
 # }
+REST_FRAMEWORK = {
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.IsAuthenticated',
+    ]
+}
